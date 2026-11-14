@@ -70,16 +70,17 @@ def add_deformable_from_usd(builder: ModelBuilder, stage: Usd.Stage, geometry: D
         label=geometry.root_path,
         **material_kwargs,
     )
-    particle_range = (particle_start, builder.particle_count)
-    if geometry.deformable_type == "volume":
-        builder._record_soft_group(geometry.root_path, particle_range, (tet_start, len(builder.tet_indices)))
-    else:
-        builder._record_cloth_group(
-            geometry.root_path,
-            particle_range,
-            (tri_start, len(builder.tri_indices)),
-            (edge_start, len(builder.edge_indices)),
-        )
+    if not hasattr(builder, "surface_label"):
+        particle_range = (particle_start, builder.particle_count)
+        if geometry.deformable_type == "volume":
+            builder._record_soft_group(geometry.root_path, particle_range, (tet_start, len(builder.tet_indices)))
+        else:
+            builder._record_cloth_group(
+                geometry.root_path,
+                particle_range,
+                (tri_start, len(builder.tri_indices)),
+                (edge_start, len(builder.edge_indices)),
+            )
 
 
 def add_visual_deformables_to_sources(
@@ -110,12 +111,18 @@ def add_visual_deformables_to_sources(
                 mesh.update(k_mu=1e5, k_lambda=1e5, k_damp=0.0)
             add_mesh(label=entry.vis_mesh_path, **mesh, **pose)
             # Remove private recording when the pinned Newton includes #3326.
-            particle_range = particle_start, builder.particle_count
-            if surface:
-                tri_range, edge_range = (tri_start, len(builder.tri_indices)), (edge_start, len(builder.edge_indices))
-                builder._record_cloth_group(entry.vis_mesh_path, particle_range, tri_range, edge_range)
-            else:
-                builder._record_soft_group(entry.vis_mesh_path, particle_range, (tet_start, len(builder.tet_indices)))
+            if not hasattr(builder, "surface_label"):
+                particle_range = particle_start, builder.particle_count
+                if surface:
+                    tri_range, edge_range = (
+                        (tri_start, len(builder.tri_indices)),
+                        (edge_start, len(builder.edge_indices)),
+                    )
+                    builder._record_cloth_group(entry.vis_mesh_path, particle_range, tri_range, edge_range)
+                else:
+                    builder._record_soft_group(
+                        entry.vis_mesh_path, particle_range, (tet_start, len(builder.tet_indices))
+                    )
 
 
 def build_source_builders(

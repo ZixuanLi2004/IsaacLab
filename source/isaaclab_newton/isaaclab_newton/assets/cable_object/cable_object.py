@@ -54,7 +54,7 @@ class CableObject(BaseCableObject):
     @property
     def num_segments(self) -> int:
         """Number of rigid segments per cable."""
-        return self.root_view.link_count + 1
+        return self.data._num_segments
 
     @property
     def root_view(self) -> ArticulationView:
@@ -190,13 +190,16 @@ class CableObject(BaseCableObject):
             verbose=False,
         )
         topology_error = "CableObject requires one standalone, unwelded cable articulation per simulation world."
-        expected_joint_count = num_segments - 1
         joint_types = self.root_view.get_attribute("joint_type", model).numpy()
+        # New Rod articulations include a FREE root with 7 q / 6 qd slots.
+        # Legacy rods encode only the inter-segment material joints.
+        has_free_root = bool((joint_types[..., 0] == int(JointType.FREE)).all())
+        expected_joint_count = num_segments if has_free_root else num_segments - 1
         valid_topology = (
             self.root_view.count_per_world == 1
             and self.root_view.joint_count == expected_joint_count
             and self.root_view.link_count == expected_joint_count
-            and bool((joint_types == int(JointType.CABLE)).all())
+            and bool((joint_types[..., int(has_free_root) :] == int(JointType.ROD)).all())
         )
         if not valid_topology:
             raise RuntimeError(topology_error)

@@ -7,8 +7,11 @@
 import importlib.metadata
 import os
 
-ISAACLAB_ASSETS_EXT_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../"))
-"""Path to the extension source directory."""
+_PACKAGE_DIR = os.path.abspath(os.path.dirname(__file__))
+ISAACLAB_ASSETS_EXT_DIR = (
+    _PACKAGE_DIR if os.path.isdir(os.path.join(_PACKAGE_DIR, "data")) else os.path.dirname(_PACKAGE_DIR)
+)
+"""Path to extension resources in a source checkout or installed wheel."""
 
 ISAACLAB_ASSETS_DATA_DIR = os.path.join(ISAACLAB_ASSETS_EXT_DIR, "data")
 """Path to the extension data directory."""

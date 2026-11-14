@@ -267,12 +267,17 @@ def _replicate_newton(
     if simulation:
         NewtonManager._cable_bindings = cable_bindings
         geometry = expand_deformable_entries(entries, plan, env_ids, positions, imported_sources=source_builders)
+        # Newton 1.8 records surface/volume objects in the native mesh builders.
+        # 1.6 uses the private cloth/soft group names populated below.
+        families = (
+            (("surface_label", "_surface_particle_start"), ("volume_label", "_volume_particle_start"))
+            if hasattr(builder, "surface_label")
+            else (("_cloth_label", "_cloth_particle_start"), ("_soft_label", "_soft_particle_start"))
+        )
         ranges = {
             label: start
-            for family in ("cloth", "soft")
-            for label, start in zip(
-                getattr(builder, f"_{family}_label"), getattr(builder, f"_{family}_particle_start"), strict=True
-            )
+            for labels, starts in families
+            for label, start in zip(getattr(builder, labels), getattr(builder, starts), strict=True)
         }
         offsets = [ranges[entry.root_path] for entry in geometry]
         batches = deformable_geometry_batches(geometry, offsets, device=sim.device)

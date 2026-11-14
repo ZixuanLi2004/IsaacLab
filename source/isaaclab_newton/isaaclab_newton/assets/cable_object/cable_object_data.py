@@ -73,13 +73,20 @@ class CableObjectData(BaseCableObjectData):
         model = SimulationManager.get_model()
         state = SimulationManager.get_state_0()
         self._num_instances = self._root_view.count
-        self._num_segments = self._root_view.link_count + 1
-        self._sim_bind_root_body_ids = self._root_view.get_attribute("joint_parent", model)[:, 0, 0].contiguous()
-        self._sim_bind_link_body_ids = self._root_view.get_attribute("joint_child", model)[:, 0].contiguous()
+        root_parents = self._root_view.get_attribute("joint_parent", model)[:, 0, 0]
+        joint_children = self._root_view.get_attribute("joint_child", model)[:, 0]
+        # Topology was validated by CableObject. An explicit FREE root's parent
+        # is world (-1); its child is the first segment, not an extra segment.
+        has_free_root = bool((root_parents.numpy() == -1).all())
+        self._num_segments = self._root_view.link_count + (0 if has_free_root else 1)
+        self._sim_bind_root_body_ids = (joint_children[:, 0] if has_free_root else root_parents).contiguous()
+        self._sim_bind_link_body_ids = (joint_children[:, 1:] if has_free_root else joint_children).contiguous()
         self._sim_bind_root_pose_w = state.body_q[self._sim_bind_root_body_ids]
         self._sim_bind_root_velocity_w = state.body_qd[self._sim_bind_root_body_ids]
-        self._sim_bind_link_pose_w = self._root_view.get_link_transforms(state)[:, 0]
-        self._sim_bind_link_velocity_w = self._root_view.get_link_velocities(state)[:, 0]
+        link_pose = self._root_view.get_link_transforms(state)[:, 0]
+        link_velocity = self._root_view.get_link_velocities(state)[:, 0]
+        self._sim_bind_link_pose_w = link_pose[:, 1:] if has_free_root else link_pose
+        self._sim_bind_link_velocity_w = link_velocity[:, 1:] if has_free_root else link_velocity
 
     def _create_buffers(self) -> None:
         """Create cable state buffers."""

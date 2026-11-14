@@ -289,7 +289,10 @@ class NewtonMPMManager(NewtonManager):
         return (
             solver.max_active_cell_count > 0
             and solver.grid_padding == 0
-            and solver.velocity_basis == "Q1"
+            and (
+                solver.velocity_basis == "Q1"
+                or (getattr(solver, "_sparse_rebuildable", False) and solver.velocity_basis in ("B2", "B3"))
+            )
             and strain_rebuild_safe
             and collider_rebuild_safe
         )

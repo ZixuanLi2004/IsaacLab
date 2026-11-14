@@ -50,7 +50,7 @@ dependencies = [
     "pyglet>=2.1.6,<3",
     "transformers==5.10.4",
     "einops",
-    "warp-lang==1.17.0",
+    "warp-lang==1.19.0",
     "matplotlib>=3.10.3",
     # pillow: floor, not exact — an exact pin below Isaac Sim's prebundled version forces a
     # downgrade that deletes the prebundled copy other extensions symlink into (nvbugs 6410989).
@@ -87,7 +87,7 @@ dependencies = [
     "gitpython>=3.1.60",  # used by RL training and experiment logging
     # ----- newton (default physics engine) -----
     # Pin the Newton release used by both workspace and wheel installs.
-    "newton[sim]==1.6.1",
+    "newton[sim]==1.8.0",
     # Import and mesh-processing packages used by Newton, including the ones that honoring
     # USD-authored ``physics:approximation`` requires. Keep these explicit instead of selecting
     # newton[importers], whose standalone USD dependency would overlap with usd-exchange.
@@ -101,9 +101,9 @@ dependencies = [
     "pycollada>=0.9",
     "resolve-robotics-uri-py>=0.4.0",
     "open3d>=0.19.0 ; python_version < '3.13' and (sys_platform != 'linux' or platform_machine != 'aarch64')",
-    # Authored MPM particle import requires the 0.5 schema revision. The managed
+    # Keep schemas aligned with the selected Newton release. The managed
     # Isaac Sim workflow overrides its older exact transitive pin below.
-    "newton-usd-schemas>=0.5.0",
+    "newton-usd-schemas==0.6.0",
     "PyOpenGL-accelerate>=3.1.0",
     # ----- newton interactive viewer GUI (in base, no extra required) -----
     "imgui-bundle>=1.92.5",
@@ -234,8 +234,12 @@ torchvision = "0.26.0"
 ovphysx = "0.6.4.72118723"
 ovrtx = "0.5.1.385782"
 ovstage = "0.2.1.385922"
-newton = "1.6.1"
-warp = "1.17.0"
+newton = "1.8.0"
+warp = "1.19.0"
+mujoco = "3.17.0"
+mujoco_warp = "3.17.0"
+newton_usd_schemas = "0.6.0"
+mujoco_usd_converter = "0.9.0"
 
 [tool.ruff]
 line-length = 120
@@ -415,11 +419,12 @@ environments = [
 # Direct torch-stack pins also apply to published wheels; overrides reconcile Isaac Sim's older pins.
 override-dependencies = [
     "numpy>=2",
-    "mujoco~=3.12.0",
-    "mujoco-warp~=3.12.0",
-    "newton[sim]==1.6.1",
-    # Force the Newton-matched schemas over isaacsim's ==0.2.0 pin.
-    "newton-usd-schemas>=0.5.0",
+    "mujoco==3.17.0",
+    "mujoco-warp==3.17.0",
+    "newton[sim]==1.8.0",
+    # Keep the Newton-matched schemas and converter above Isaac Sim's legacy pins.
+    "newton-usd-schemas==0.6.0",
+    "mujoco-usd-converter==0.9.0",
     # isaacsim-asset-isolated and isaacsim-robot-schema 6.2 pin usd-exchange ==2.3.0.
     "usd-exchange==3.0.1",
     # usd-optimize must share usd-exchange's OpenUSD build (26.08); bump the two together.

@@ -210,11 +210,14 @@ class NewtonBackend:
         self.particle_ranges: dict[str, tuple[int, int]] = {}
         # Newton 1.6 preserves groups through builder replication but not finalization.
         # Remove this snapshot when the pinned Newton includes newton-physics/newton#3326.
+        families = (("surface", "surface_label", "surface"), ("volume", "volume_label", "volume"))
+        if not hasattr(builder, "surface_label"):
+            families = (("cloth", "_cloth_label", "surface"), ("soft", "_soft_label", "volume"))
         self.deformable_ranges = {
             label: (start, end - start, kind)
-            for family, kind in (("cloth", "surface"), ("soft", "volume"))
+            for family, labels, kind in families
             for label, start, end in zip(
-                getattr(builder, f"_{family}_label"),
+                getattr(builder, labels),
                 getattr(builder, f"_{family}_particle_start"),
                 getattr(builder, f"_{family}_particle_end"),
                 strict=True,

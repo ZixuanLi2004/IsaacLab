@@ -1608,7 +1608,7 @@ class ArticulationData(BaseArticulationData):
         """
         # A full Newton reset recreates model/state arrays, invalidating recorded pointers.
         self._read_launch_cache.clear()
-        self._root_view._get_attribute_array.cache_clear()
+        self._root_view._attribute_array_cache.clear()
         self._indexed_bindings = IndexedBindings(self._root_view)
 
         # Short-hand for the number of instances, number of links, and number of joints.

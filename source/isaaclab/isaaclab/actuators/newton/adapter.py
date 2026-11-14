@@ -27,7 +27,8 @@ import torch
 import warp as wp
 from newton import Model
 from newton._src.utils.selection import FrequencyLayout
-from newton.actuators import Actuator, Clamping, Delay
+from newton.actuators import Actuator, Delay
+from newton.actuators import ClampingBase as Clamping
 from newton.selection import ArticulationView
 
 from ...utils import index_fill_

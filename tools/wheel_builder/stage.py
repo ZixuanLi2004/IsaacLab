@@ -48,14 +48,6 @@ def stage_package(repo_root: Path, stage_dir: Path, version: str) -> None:
             if resource_dir.is_dir():
                 shutil.copytree(resource_dir, installed_package / resource_name)
 
-        init_path = installed_package / "__init__.py"
-        init_contents = init_path.read_text(encoding="utf-8")
-        init_contents = init_contents.replace(
-            'os.path.join(os.path.dirname(__file__), "../"',
-            'os.path.join(os.path.dirname(__file__), ""',
-        )
-        init_path.write_text(init_contents, encoding="utf-8")
-
         shutil.rmtree(inner_package)
         shutil.rmtree(extension_dir / "data", ignore_errors=True)
 
