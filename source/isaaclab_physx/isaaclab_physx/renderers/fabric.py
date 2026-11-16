@@ -197,6 +197,7 @@ class FabricBackend:
         self.transforms = self._selection = self._write_selection = None
         self._mapping = self._scales = self.hierarchy = self.stage = None
         self._geometry_bindings = None
+        self.usd_stage = None
 
 
 @configclass

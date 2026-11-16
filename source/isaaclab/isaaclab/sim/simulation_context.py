@@ -121,6 +121,7 @@ class SimulationContext:
         # Store config
         self.cfg = SimulationCfg() if cfg is None else cfg
         self._backend_registry: list[tuple[Any, Any]] = []
+        self._completed_teardown_steps: set[str] = set()
         self.clone_contexts: dict[type, Any] = {}
         """Clone-context instances registered by type before plan dispatch; not native resource owners."""
 
@@ -959,65 +960,89 @@ class SimulationContext:
 
     @classmethod
     def clear_instance(cls) -> None:
-        """Clean up resources and clear the singleton instance."""
+        """Close consumers before producers, retaining failed teardown for retry.
+
+        A failed consumer fence keeps the singleton and its scene/backend owners
+        alive. Call this method again after resolving the failure; successfully
+        closed consumers are not reopened or closed again.
+        """
         instance = cls._instance
         if instance is not None:
-            teardown_errors: list[Exception] = []
+            teardown_errors: list[tuple[str, Exception]] = []
+            completed_steps = getattr(instance, "_completed_teardown_steps", None)
+            if completed_steps is None:
+                completed_steps = instance._completed_teardown_steps = set()
 
-            def run_cleanup(callback: Callable[[], Any]) -> None:
+            def run_cleanup(label: str, callback: Callable[[], Any], *, once: bool = False) -> bool:
+                if once and label in completed_steps:
+                    return True
                 try:
                     callback()
                 except Exception as exc:
-                    teardown_errors.append(exc)
+                    teardown_errors.append((label, exc))
+                    return False
+                if once:
+                    completed_steps.add(label)
+                return True
 
-            try:
-                # Close physics manager FIRST to detach PhysX from the stage.
-                run_cleanup(instance.physics_manager.close)
-
-                # Close camera renderers after STOP invalidates camera-owned render data and
-                # before the stage is closed so stage-bound renderer resources remain valid.
-                run_cleanup(instance._render_context.close)
-                for cfg, resource in tuple(instance._backend_registry):
-                    if isinstance(cfg, RendererCfg):
-                        run_cleanup(lambda resource=resource: instance.close_backend(resource))
-
-                # Give every visualizer a chance to release its resources.
-                for viz in (*instance._visualizers, *instance._pending_visualizers):
-                    run_cleanup(viz.close)
-                instance._visualizers.clear()
-                instance._pending_visualizers.clear()
-
-                instance.clone_contexts.clear()
-                # Newest first: the Kit USD-context backend, registered first, closes last but
-                # before close_stage() clears the stage cache.
-                for cfg, resource in reversed(instance._backend_registry):
-                    if isinstance(cfg, BackendCfg) and not isinstance(cfg, RendererCfg):
-                        run_cleanup(lambda resource=resource: resource.close())
-                instance._backend_registry.clear()
-
-                # Tear down the stage. We skip clear_stage() (prim-by-prim deletion) since
-                # close_stage() + app shutdown destroy the entire stage at once.
-                run_cleanup(stage_utils.close_stage)
-
-                # Discard cached name-resolution data from destroyed assets.
-                run_cleanup(clear_resolve_matching_names_cache)
-            finally:
-                cls._instance = None
-                del instance
-
-            run_cleanup(gc.collect)
-
-            logger.info("SimulationContext cleared")
-
-            if len(teardown_errors) == 1:
-                raise teardown_errors[0]
-            if teardown_errors:
-                details = "; ".join(f"{type(error).__name__}: {error}" for error in teardown_errors)
+            def raise_teardown_errors() -> None:
+                if not teardown_errors:
+                    return
+                details = "; ".join(f"{label}: {type(error).__name__}: {error}" for label, error in teardown_errors)
                 msg = (
                     f"SimulationContext.clear_instance(): {len(teardown_errors)} error(s) occurred during teardown:"
-                    f" {details}"
+                    f" {details}. Remaining producers and the singleton were retained; retry clear_instance()."
                 )
-                raise RuntimeError(msg) from teardown_errors[0]
+                if len(teardown_errors) == 1:
+                    error = teardown_errors[0][1]
+                    error.add_note(msg)
+                    raise error
+                raise RuntimeError(msg) from teardown_errors[0][1]
+
+            # Close physics FIRST to detach PhysX. All remaining consumers get a
+            # close attempt, but any failure blocks publication/backend destruction.
+            run_cleanup("physics manager close", instance.physics_manager.close, once=True)
+            run_cleanup("render context close", instance._render_context.close, once=True)
+            for cfg, resource in tuple(instance._backend_registry):
+                if isinstance(cfg, RendererCfg):
+                    run_cleanup(
+                        f"renderer {type(resource).__name__} close/fence",
+                        lambda resource=resource: instance.close_backend(resource),
+                    )
+            for visualizers in (instance._visualizers, instance._pending_visualizers):
+                remaining = []
+                for viz in visualizers:
+                    if not run_cleanup(f"visualizer {id(viz)} close", viz.close, once=True):
+                        remaining.append(viz)
+                visualizers[:] = remaining
+            raise_teardown_errors()
+
+            instance.clone_contexts.clear()
+            scene_data_provider = getattr(instance, "_scene_data_provider", None)
+            if scene_data_provider is not None:
+                run_cleanup("scene data provider close", scene_data_provider.close, once=True)
+            raise_teardown_errors()
+            instance._interactive_scene = None
+            # Newest first. A failed backend can still borrow an older producer,
+            # so retain that entry and stop before closing its dependencies.
+            for cfg, resource in reversed(tuple(instance._backend_registry)):
+                if not run_cleanup(
+                    f"backend {type(resource).__name__} close",
+                    lambda resource=resource: instance.close_backend(resource),
+                ):
+                    break
+            raise_teardown_errors()
+
+            # close_stage() clears the whole stage; no prim-by-prim deletion.
+            run_cleanup("USD stage close", stage_utils.close_stage, once=True)
+            raise_teardown_errors()
+            instance.stage = None
+            run_cleanup("name-resolution cache clear", clear_resolve_matching_names_cache, once=True)
+            raise_teardown_errors()
+            cls._instance = None
+            del instance
+            gc.collect()
+            logger.info("SimulationContext cleared")
 
     @classmethod
     def clear_stage(cls) -> None:

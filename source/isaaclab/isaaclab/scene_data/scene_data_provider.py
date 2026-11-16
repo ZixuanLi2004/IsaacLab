@@ -68,6 +68,18 @@ class SceneDataProvider:
         self._cache: dict[Any, TimestampedBuffer] = {}
         self._transform_mappings: dict[tuple, wp.array | None] = {}
 
+    def close(self) -> None:
+        """Release borrowed owners and conversion buffers after consumers have stopped.
+
+        The simulation owns the backend; a provider must never close its producer.
+        This also breaks the scene-to-context cycle when callers retain a closed context.
+        """
+        self._interactive_scene = None
+        self._cache.clear()
+        self._transform_mappings.clear()
+        self._num_envs_cache = None
+        self.backend = None
+
     def get_transforms(
         self,
         output: SceneDataFormat.Vec3_Quat
@@ -132,7 +144,8 @@ class SceneDataProvider:
                 return True
         else:
             layout = (output_format, mapping, count, scales)
-            key = ref(output, self._cache.pop) if fabric else layout
+            # Terminal close may clear this cache before Fabric drops its output.
+            key = ref(output, lambda key, cache=self._cache: cache.pop(key, None)) if fabric else layout
             cached = self._cache.get(key) if allow_passthrough else None
             result = output
             if allow_passthrough and not fabric:

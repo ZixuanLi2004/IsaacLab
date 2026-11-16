@@ -1,0 +1,1 @@
+- Reject nonzero dry-joint-friction writes before changing property buffers when the actual owning solver declares the capability unsupported, including indexed and masked selections in coupled models.

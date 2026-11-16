@@ -288,12 +288,13 @@ def test_clear_instance_closes_renderers_before_native_backends(monkeypatch, ren
     from isaaclab.sim import BackendCfg, SimulationContext
 
     events = []
+    failure = {"enabled": fail_cleanup}
 
     class Manager:
         @classmethod
         def close(cls):
             events.append("physics")
-            if fail_cleanup:
+            if failure["enabled"]:
                 raise RuntimeError("STOP failed")
 
     class Resource:
@@ -303,7 +304,7 @@ def test_clear_instance_closes_renderers_before_native_backends(monkeypatch, ren
 
         def close(self):
             events.append(self.name)
-            if fail_cleanup and self.error is not None:
+            if failure["enabled"] and self.error is not None:
                 raise self.error
 
     context = object.__new__(SimulationContext)
@@ -332,12 +333,14 @@ def test_clear_instance_closes_renderers_before_native_backends(monkeypatch, ren
     if fail_cleanup:
         with pytest.raises(RuntimeError, match=r"4 error\(s\) occurred during teardown") as exc_info:
             SimulationContext.clear_instance()
-        assert str(exc_info.value) == (
-            "SimulationContext.clear_instance(): 4 error(s) occurred during teardown: "
-            "RuntimeError: STOP failed; OSError: renderer failed; ValueError: visualizer failed; "
-            "LookupError: backend failed"
-        )
+        message = str(exc_info.value)
+        assert "physics manager close: RuntimeError: STOP failed" in message
+        assert "renderer Resource close/fence: OSError: renderer failed" in message
+        assert "visualizer " in message and "close: ValueError: visualizer failed" in message
+        assert "backend Resource close: LookupError: backend failed" in message
+        assert "Remaining producers and the singleton were retained; retry clear_instance()." in message
         assert str(exc_info.value.__cause__) == "STOP failed"
+        failure["enabled"] = False
     else:
         SimulationContext.clear_instance()
 

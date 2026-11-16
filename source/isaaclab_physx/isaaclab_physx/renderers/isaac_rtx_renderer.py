@@ -173,7 +173,12 @@ class IsaacRtxRenderData:
         spec = self.spec
         stage = get_current_stage()
         fabric = get_current_stage(fabric=True)
-        row_attribute = f"isaaclab:cameraIntrinsicRow:{uuid.uuid4().hex}"
+        # Fabric retains native schema/token capacity for each distinct attribute name.
+        # Product slots stay unique while live and are recycled only after cleanup
+        # succeeds and the stage changes, so their calibration columns can follow
+        # the same lifetime. Keep standalone render-data construction independent.
+        row_owner = self.render_product_name or uuid.uuid4().hex
+        row_attribute = f"isaaclab:cameraIntrinsicRow:{row_owner}"
         for row, path in enumerate(spec.camera_prim_paths):
             prim = fabric.GetPrimAtPath(path)
             prim.CreateAttribute(row_attribute, usdrt.Sdf.ValueTypeNames.Int, True).Set(row)
@@ -222,6 +227,11 @@ class IsaacRtxRenderer(BaseRenderer):
         sim = SimulationContext.instance()
         self._fabric = sim.get_or_create_backend(FabricBackendCfg(stage=sim.stage, device=sim.device))
         self._fabric.bind_transforms(sim.get_scene_data_provider())
+
+    def close(self) -> None:
+        """Fence submitted reads before dropping the simulation-owned Fabric backend."""
+        self._finish_annotator_reads()
+        self._fabric = None
 
     @property
     def visual_material_writer(self):

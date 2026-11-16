@@ -20,6 +20,8 @@ from isaaclab.utils.warp.index_kernel import IndexKernelDispatcher
 
 from isaaclab_newton.physics import NewtonManager as SimulationManager
 
+from .joint_property_contracts import validate_joint_friction_write
+
 
 @wp.kernel(enable_backward=False)
 def _select_rows(ids: wp.array(dtype=Any), mask: wp.array(dtype=wp.bool)):
@@ -149,6 +151,18 @@ def indexed_write(*keys):
     def decorate(method):
         @wraps(method)
         def wrapped(self, *args, **kwargs):
+            # Capability rejection must precede gather/refresh as well as the
+            # native writer: failed parameter updates leave staging unchanged.
+            if "joint_friction" in keys:
+                selection = {key: kwargs[key] for key in ("joint_ids", "env_ids", "joint_mask", "env_mask")
+                             if key in kwargs}
+                for key in ("joint_friction_coeff", "joint_dynamic_friction_coeff"):
+                    value = kwargs.get(key)
+                    if value is not None:
+                        validate_joint_friction_write(
+                            self, SimulationManager._solver, value,
+                            masked=method.__name__.endswith("_mask"), **selection,
+                        )
             bindings = self.data._indexed_bindings
             if bindings.writing:
                 return method(self, *args, **kwargs)

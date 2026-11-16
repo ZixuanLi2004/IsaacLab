@@ -2187,8 +2187,10 @@ class Articulation(BaseArticulation):
         or 0.2 N on a prismatic joint DOF.
 
         .. note::
-            Solver support is defined by the active Newton solver. Unsupported solvers may ignore
-            ``Model.joint_friction``.
+            Solvers declaring ``supports_joint_friction=False`` reject nonzero values before any property
+            write, using the actual owning entry for coupled solvers. For these solvers, array-valued
+            writes require a host boundary outside CUDA graph capture; zero scalar writes remain valid.
+            Solvers without a capability declaration retain their existing behavior and may ignore the field.
 
         .. note::
             This method expects partial data.
@@ -2250,8 +2252,10 @@ class Articulation(BaseArticulation):
         or 0.2 N on a prismatic joint DOF.
 
         .. note::
-            Solver support is defined by the active Newton solver. Unsupported solvers may ignore
-            ``Model.joint_friction``.
+            Solvers declaring ``supports_joint_friction=False`` reject nonzero values before any property
+            write, using the actual owning entry for coupled solvers. For these solvers, array-valued
+            writes require a host boundary outside CUDA graph capture; zero scalar writes remain valid.
+            Solvers without a capability declaration retain their existing behavior and may ignore the field.
 
         .. note::
             This method expects full data.
