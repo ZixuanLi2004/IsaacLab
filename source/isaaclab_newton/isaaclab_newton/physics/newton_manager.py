@@ -526,6 +526,7 @@ class NewtonManager(PhysicsManager):
     # Collision and contacts
     _contacts: Contacts | None = None
     _needs_collision_pipeline: bool = False
+    _solver_owns_collision_pipeline: bool = False
     _collision_pipeline = None
     _collision_cfg: NewtonCollisionPipelineCfg | None = None
     _newton_contact_sensors: dict = {}  # Maps sensor_key to NewtonContactSensor
@@ -853,6 +854,7 @@ class NewtonManager(PhysicsManager):
         NewtonManager._supports_rigid_body_force_input = False
         NewtonManager._contacts = None
         NewtonManager._needs_collision_pipeline = False
+        NewtonManager._solver_owns_collision_pipeline = False
         NewtonManager._ignored_model_changes = {}
         NewtonManager._warned_model_changes = set()
         NewtonManager._deterministic_mode = wp.DeterministicMode.NOT_GUARANTEED
@@ -1475,6 +1477,10 @@ class NewtonManager(PhysicsManager):
           manager owns Newton's :class:`CollisionPipeline` for contact
           generation; ``False`` if the solver runs internal collision
           detection (MuJoCo internal contacts, Kamino with its own detector).
+        * :attr:`NewtonManager._solver_owns_collision_pipeline` — ``True`` if
+          the solver refreshes that shared pipeline during every solver
+          substep. The manager still allocates and passes the shared contacts
+          buffer, but skips its generic outer and mid-loop queries.
         * :attr:`NewtonManager._supports_rigid_body_force_input` — ``True`` if
           the solver consumes external rigid-body forces from
           :attr:`State.body_f`; ``False`` otherwise.
@@ -1665,6 +1671,7 @@ class NewtonManager(PhysicsManager):
             NewtonManager._deterministic_mode = deterministic_mode
             NewtonManager._solver_dt = cls.get_physics_dt() / cls._num_substeps
             NewtonManager._collision_cfg = cfg.collision_cfg  # type: ignore[union-attr]
+            NewtonManager._solver_owns_collision_pipeline = False
 
             cls._build_solver(cls.backend.model, cfg.solver_cfg)  # type: ignore[union-attr]
             if NewtonManager._solver is None:
@@ -1752,9 +1759,15 @@ class NewtonManager(PhysicsManager):
         """
         backend = cls.backend
         collide_every = cls._collision_decimation
-        # Last substep is skipped: its contact set would only feed the next tick's
-        # top-of-loop collide(), not this one.
-        collide_mid_loop = collide_every > 0 and cls._needs_collision_pipeline and contacts is not None
+        # For manager-owned pipelines, the last substep is skipped because its
+        # contact set would only feed the next tick's top-of-loop query. A solver
+        # that owns the pipeline refreshes it inside every substep instead.
+        collide_mid_loop = (
+            collide_every > 0
+            and cls._needs_collision_pipeline
+            and not cls._solver_owns_collision_pipeline
+            and contacts is not None
+        )
 
         if cls._use_single_state:
             for i in range(cls._num_substeps):
@@ -1810,7 +1823,7 @@ class NewtonManager(PhysicsManager):
 
         cls._stage_body_forces()
         for i in range(cls._decimation):
-            if cls._needs_collision_pipeline:
+            if cls._needs_collision_pipeline and not cls._solver_owns_collision_pipeline:
                 cls._collision_pipeline.collide(cls.backend.state_0, cls._contacts)
 
             if cls._adapter is not None:
@@ -1838,8 +1851,9 @@ class NewtonManager(PhysicsManager):
         """
         cls._stage_body_forces()
         if cls._needs_collision_pipeline:
-            cls._collision_pipeline.collide(cls.backend.state_0, cls._contacts)
             contacts = cls._contacts
+            if not cls._solver_owns_collision_pipeline:
+                cls._collision_pipeline.collide(cls.backend.state_0, contacts)
         else:
             contacts = None
 
