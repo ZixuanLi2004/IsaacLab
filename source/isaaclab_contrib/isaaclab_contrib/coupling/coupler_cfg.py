@@ -244,3 +244,12 @@ class CouplerAdmmCfg(CouplerCfg):
 
     contact_matching_force_scale: float = 0.9
     """Scale applied to the previous ADMM dual when a rigid contact matches."""
+
+    speculative_contact_gap_max: float | None = None
+    """Velocity-derived rigid contact search extension cap [m]."""
+
+    speculative_conservative_advancement: bool = False
+    """Enable bounded conservative advancement for supported rigid contacts."""
+
+    soft_contact_gap: float = 0.0
+    """Fixed rigid-particle detection gap [m] for ADMM soft contacts."""
