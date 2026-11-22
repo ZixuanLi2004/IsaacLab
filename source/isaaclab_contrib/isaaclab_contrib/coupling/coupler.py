@@ -42,6 +42,12 @@ from .coupler_cfg import (
 class NewtonCouplerManager(NewtonVBDManager):
     """Couple named Newton solver entries through proxy or ADMM interfaces."""
 
+    _SUPPORTED_ADMM_CONTACT_ROW_KINDS = frozenset({
+        "rigid_rigid",
+        "rigid_particle",
+        "particle_particle",
+    })
+
     @dataclass
     class _ResolvedEntry:
         """Entry configuration with model selectors resolved to indices."""
@@ -130,6 +136,29 @@ class NewtonCouplerManager(NewtonVBDManager):
             raise ValueError("CouplerCfg.entries must contain at least one solver entry.")
 
         if isinstance(solver_cfg, CouplerAdmmCfg):
+            row_kinds = solver_cfg.contact_row_kinds
+            if isinstance(row_kinds, (str, bytes)) or not isinstance(row_kinds, list):
+                raise ValueError(
+                    "CouplerAdmmCfg.contact_row_kinds must be a list of strings. "
+                    "Use an empty list for the native all-row behavior."
+                )
+            normalized_row_kinds = []
+            for index, kind in enumerate(row_kinds):
+                if not isinstance(kind, str) or not kind.strip():
+                    raise ValueError(
+                        f"CouplerAdmmCfg.contact_row_kinds[{index}] must be a non-empty string."
+                    )
+                normalized_row_kinds.append(kind.strip().lower())
+            if len(normalized_row_kinds) != len(set(normalized_row_kinds)):
+                raise ValueError("CouplerAdmmCfg.contact_row_kinds must not contain duplicates.")
+            unsupported = set(normalized_row_kinds) - cls._SUPPORTED_ADMM_CONTACT_ROW_KINDS
+            if unsupported:
+                supported = ", ".join(sorted(cls._SUPPORTED_ADMM_CONTACT_ROW_KINDS))
+                raise ValueError(
+                    "CouplerAdmmCfg.contact_row_kinds contains unsupported kinds "
+                    f"{sorted(unsupported)!r}. Supported kinds are {supported}. "
+                    "Use Proxy for full-surface or pressure coupling until those row contracts are implemented."
+                )
             capacity = solver_cfg.contact_max_triangle_pairs
             if capacity is not None and (type(capacity) is not int or capacity <= 0):
                 raise ValueError("CouplerAdmmCfg.contact_max_triangle_pairs must be a positive integer or None.")

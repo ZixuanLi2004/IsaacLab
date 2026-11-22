@@ -179,6 +179,15 @@ class CouplerProxyCfg(CouplerCfg):
 class CouplerAdmmCfg(CouplerCfg):
     """Configuration for Newton's linearized ADMM coupling."""
 
+    contact_row_kinds: list[str] = field(default_factory=list)
+    """Dynamic contact row kinds to build.
+
+    Supported values are ``rigid_rigid``, ``rigid_particle`` and
+    ``particle_particle``. An empty list preserves Newton's legacy behavior
+    and builds every supported kind. Full-surface and pressure rows are not
+    admitted by the current ADMM backend.
+    """
+
     contact_max_triangle_pairs: int | None = None
     """Internal ADMM triangle-pair capacity across all environments in one process.
 
