@@ -186,18 +186,21 @@ class KitLauncher(SimulationLauncher):
         # back the core settings with the running app
         import carb
 
-        get_settings_manager().set_backend(carb.settings.get_settings())
+        settings = carb.settings.get_settings()
+        get_settings_manager().set_backend(settings)
         # Isaac Sim's stage helpers load only with their extension, which may be enabled later.
         import omni.kit.app
 
-        self._stage_context_hook = (
-            omni.kit.app.get_app()
-            .get_extension_manager()
-            .subscribe_to_extension_enable(
-                lambda _: _share_stage_context(),
-                ext_name="isaacsim.core.experimental.utils",
-                hook_name="isaaclab stage context",
-            )
+        extension_manager = omni.kit.app.get_app().get_extension_manager()
+        # Kit uses the experience's exclusions for its startup solve. Apply the same list to
+        # later solves so enabling scene extensions cannot shadow installed packages like Warp.
+        excluded = settings.get("/app/extensions/excluded")
+        if excluded:
+            extension_manager.set_extensions_excluded(list(excluded))
+        self._stage_context_hook = extension_manager.subscribe_to_extension_enable(
+            lambda _: _share_stage_context(),
+            ext_name="isaacsim.core.experimental.utils",
+            hook_name="isaaclab stage context",
         )
         if self._deferred_cuda_device_id is not None:
             set_cuda_device(self._deferred_cuda_device_id)
