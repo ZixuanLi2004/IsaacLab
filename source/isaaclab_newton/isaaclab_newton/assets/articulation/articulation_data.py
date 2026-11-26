@@ -1094,8 +1094,11 @@ class ArticulationData(BaseArticulationData):
         # Warp's stream-ordered mempool allocator — capture-safe when mempools are
         # enabled (validated by Newton's own graph-capture test) — so only the output
         # and gather buffers are retained here.
+        options = {}
+        if (body_gravity := self._effective_body_gravity()) is not None:
+            options["body_gravity"] = body_gravity
         self._root_view.eval_inverse_dynamics_passive(
-            SimulationManager.get_state_0(), gravity_force=self._gravity_force_full_buf
+            SimulationManager.get_state_0(), gravity_force=self._gravity_force_full_buf, **options
         )
         # Topology arrays come from the same Model object the eval above computed
         # against (the view's), so the gather can never mix models across a rebuild.
@@ -1116,6 +1119,43 @@ class ArticulationData(BaseArticulationData):
             device=self.device,
         )
         return self._gravity_compensation_forces_ta
+
+    def _effective_body_gravity(self) -> wp.array | None:
+        """Get live gravity from the actual solver owners, excluding coupled proxy bodies."""
+        solver = SimulationManager._solver
+        model = self._root_view.model
+        if solver is not self._gravity_solver:
+            self._gravity_solver = solver
+            self._gravity_entries = [
+                (entry, wp.empty(entry.view.body_count, dtype=wp.vec3, device=self.device))
+                for entry in getattr(solver, "_entries", {}).values()
+                if entry.body_indices.size and getattr(entry.solver, "articulation_uses_effective_gravity", False)
+            ]
+            self._body_gravity = None
+            if self._gravity_entries or getattr(solver, "articulation_uses_effective_gravity", False):
+                self._body_gravity = wp.empty(model.body_count, dtype=wp.vec3, device=self.device)
+        if self._body_gravity is None:
+            return None
+        if not self._gravity_entries:
+            solver.coupling_eval_gravity_acceleration(self._body_gravity, None)
+        else:
+            wp.launch(
+                articulation_kernels.gather_world_gravity,
+                dim=model.body_count,
+                inputs=[model.body_world, model.gravity],
+                outputs=[self._body_gravity],
+                device=self.device,
+            )
+            for entry, local in self._gravity_entries:
+                entry.solver.coupling_eval_gravity_acceleration(local, None)
+                wp.launch(
+                    articulation_kernels.scatter_owned_body_gravity,
+                    dim=entry.body_indices.size,
+                    inputs=[entry.body_indices, entry.body_global_to_local, local],
+                    outputs=[self._body_gravity],
+                    device=self.device,
+                )
+        return self._body_gravity
 
     """
     Joint state properties.
@@ -1944,6 +1984,9 @@ class ArticulationData(BaseArticulationData):
         self._jacobian_buf_flat: wp.array | None = None
         self._mass_matrix_full_buf: wp.array | None = None
         self._gravity_force_full_buf: wp.array | None = None
+        self._gravity_solver = None
+        self._gravity_entries = []
+        self._body_gravity: wp.array | None = None
         # Empty memory pre-allocations
         self._root_link_lin_vel_b = None
         self._root_link_ang_vel_b = None

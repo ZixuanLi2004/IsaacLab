@@ -199,6 +199,7 @@ class NewtonActuatorAdapter:
                 zero_at_indices_kernel,
                 dim=act.indices.shape[0],
                 inputs=[sim_control.joint_f, act.indices],
+                device=self._device,
             )
         for act, sa, sb in zip(self.actuators, self._states_a, self._states_b):
             act.step(sim_state, sim_control, sa, sb, dt=dt)

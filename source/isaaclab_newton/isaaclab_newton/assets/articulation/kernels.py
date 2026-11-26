@@ -784,6 +784,20 @@ def gather_mass_matrix_rows(
 
 
 @wp.kernel
+def gather_world_gravity(body_world: wp.array[int], gravity: wp.array[wp.vec3], out: wp.array[wp.vec3]):
+    body = wp.tid()
+    out[body] = gravity[body_world[body]]
+
+
+@wp.kernel
+def scatter_owned_body_gravity(
+    owned: wp.array[int], global_to_local: wp.array[int], local: wp.array[wp.vec3], out: wp.array[wp.vec3]
+):
+    body = owned[wp.tid()]
+    out[body] = local[global_to_local[body]]
+
+
+@wp.kernel
 def gather_dof_force_rows(
     src: wp.array(dtype=wp.float32),
     art_ids: wp.array(dtype=wp.int32),
