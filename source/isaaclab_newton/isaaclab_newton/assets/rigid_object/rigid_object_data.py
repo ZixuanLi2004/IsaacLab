@@ -79,17 +79,41 @@ class RigidObjectData(BaseRigidObjectData):
         self._sim_timestamp = 0.0
         self._is_primed = False
 
-        # Bind ``GRAVITY_VEC_W`` to Newton's per-env ``model.gravity`` (m/s^2) so
-        # per-env gravity randomization stays live; consumers normalize on read.
-        # The final entry is reserved for Newton's global world and is not an
-        # Isaac Lab environment.
+        # Gravity remains a live slice so changes to the source world propagate.
+        # Singleton views use asset row zero even for other local worlds and for
+        # Newton's global world (-1), whose gravity is the final model row.
         model = SimulationManager.get_model()
-        self.GRAVITY_VEC_W = ProxyArray(model.gravity[: model.world_count])
+        self._binding_model = weakref.ref(model)
+        if root_view.is_sparse and root_view.world_count > 1:
+            raise ValueError("Rigid object data requires all model worlds or a single selected world.")
+        self._all_view_rows = root_view.world_ids
+        if root_view.world_count == 1:
+            world = int(root_view.world_ids.numpy()[0])
+            self.GRAVITY_VEC_W = ProxyArray(model.gravity[-1:] if world == -1 else model.gravity[world : world + 1])
+            if world != 0:
+                self._all_view_rows = wp.zeros(1, dtype=wp.int32, device=device)
+        else:
+            self.GRAVITY_VEC_W = ProxyArray(model.gravity[: model.world_count])
         forward_vec = np.full((self._root_view.count, 3), (1.0, 0.0, 0.0), dtype=np.float32)
         self.FORWARD_VEC_B = ProxyArray(wp.array(forward_vec, dtype=wp.vec3f, device=self.device))
 
         self._create_simulation_bindings()
         self._create_buffers()
+
+    def _check_binding_model(self) -> None:
+        model = self._binding_model()
+        if model is None or model is not SimulationManager.get_model():
+            raise RuntimeError("Rigid object data belongs to a different Newton model. Recreate the asset.")
+
+    @property
+    def GRAVITY_VEC_W(self) -> ProxyArray:
+        """Live per-world gravity for the source model."""
+        self._check_binding_model()
+        return self._gravity_vec_w
+
+    @GRAVITY_VEC_W.setter
+    def GRAVITY_VEC_W(self, value: ProxyArray) -> None:
+        self._gravity_vec_w = value
 
     @property
     def is_primed(self) -> bool:
@@ -119,6 +143,7 @@ class RigidObjectData(BaseRigidObjectData):
         Args:
             dt: The time step for the update. This must be a positive value.
         """
+        self._check_binding_model()
         # update the simulation timestamp
         self._sim_timestamp += dt
         # Trigger an update of the body com acceleration buffer at a higher frequency
@@ -158,9 +183,7 @@ class RigidObjectData(BaseRigidObjectData):
                 self._root_com_state_w,
             ]
         )
-        SimulationManager.invalidate_fk(
-            env_mask=env_mask, env_ids=env_ids, articulation_ids=self._root_view.articulation_ids
-        )
+        self._invalidate_fk(env_ids, env_mask)
 
     def _reset_velocity(
         self, from_com: bool = True, *, env_ids: wp.array | torch.Tensor | None = None, env_mask: wp.array | None = None
@@ -188,9 +211,25 @@ class RigidObjectData(BaseRigidObjectData):
                 self._root_com_state_w,
             ]
         )
+        self._invalidate_fk(env_ids, env_mask)
+
+    def _invalidate_fk(self, env_ids, env_mask) -> None:
+        if env_ids is None and env_mask is None:
+            env_ids = self._all_view_rows
         SimulationManager.invalidate_fk(
-            env_mask=env_mask, env_ids=env_ids, articulation_ids=self._root_view.articulation_ids
+            env_ids=env_ids,
+            env_mask=env_mask,
+            articulation_ids=self._root_view.articulation_ids,
+            world_ids=self._root_view.world_ids,
         )
+
+    @property
+    def _writable_root_velocity_history(self) -> wp.array | None:
+        """History to rebase when a writer changes the physical root velocity.
+
+        Fixed roots have no writable generalized velocity. Their reported body velocity stays zero.
+        """
+        return self._previous_body_com_vel if self._root_view.is_floating_base else None
 
     def _reset_body_com_pose_b_dependents(self) -> None:
         """Reset cached properties derived from the body-frame center-of-mass offset."""
@@ -278,6 +317,7 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity is the pose of the actor frame of the root rigid body relative to the world.
         The orientation is provided in (x, y, z, w) format.
         """
+        self._check_binding_model()
         return self._root_link_pose_w_ta
 
     @property
@@ -289,6 +329,7 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity contains the linear and angular velocities of the actor frame of the root
         rigid body relative to the world.
         """
+        self._check_binding_model()
         if self._root_link_vel_w.data is None:
             self._root_link_vel_w.data = ProxyArray(wp.empty(self._num_instances, wp.spatial_vectorf, self.device))
         if self._root_link_vel_w.timestamp < self._sim_timestamp:
@@ -312,6 +353,7 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity is the pose of the center of mass frame of the root rigid body relative to the world.
         The orientation is provided in (x, y, z, w) format.
         """
+        self._check_binding_model()
         if self._root_com_pose_w.data is None:
             self._root_com_pose_w.data = ProxyArray(wp.empty(self._num_instances, wp.transformf, self.device))
         if self._root_com_pose_w.timestamp < self._sim_timestamp:
@@ -334,6 +376,7 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity contains the linear and angular velocities of the root rigid body's center of mass frame
         relative to the world.
         """
+        self._check_binding_model()
         return self._root_com_vel_w_ta
 
     """
@@ -347,6 +390,7 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1, 1), dtype = wp.float32.
         In torch this resolves to (num_instances, 1, 1).
         """
+        self._check_binding_model()
         return self._body_mass_ta
 
     @property
@@ -356,6 +400,7 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1, 9), dtype = wp.float32.
         In torch this resolves to (num_instances, 1, 9).
         """
+        self._check_binding_model()
         return self._body_inertia_ta
 
     @property
@@ -366,6 +411,7 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity is the pose of the actor frame of the rigid body relative to the world.
         The orientation is provided in (x, y, z, w) format.
         """
+        self._check_binding_model()
         SimulationManager.forward()
         return self._body_link_pose_w_ta
 
@@ -392,6 +438,7 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity is the pose of the center of mass frame of the rigid body relative to the world.
         The orientation is provided in (x, y, z, w) format.
         """
+        self._check_binding_model()
         # Refresh FK and re-derive the root com pose so a stale cache is recomputed after a write.
         # The reshape cached below is a view of ``root_com_pose_w``'s buffer, so once that buffer is
         # refreshed in place the cached view reflects the fresh data without reallocation.
@@ -409,6 +456,7 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity contains the linear and angular velocities of the root rigid body's center of mass frame
         relative to the world.
         """
+        self._check_binding_model()
         SimulationManager.forward()
         return self._body_com_vel_w_ta
 
@@ -418,7 +466,9 @@ class RigidObjectData(BaseRigidObjectData):
 
         Shape is (num_instances, 1), dtype = wp.spatial_vectorf. In torch this resolves to (num_instances, 1, 6).
         This quantity is the acceleration of the rigid bodies' center of mass frame relative to the world.
+        Explicit velocity writes start a new finite-difference interval for the selected bodies.
         """
+        self._check_binding_model()
         if self._body_com_acc_w.timestamp < self._sim_timestamp:
             # Finite-difference over the elapsed time, which spans the decimation when Newton owns it.
             time_elapsed = self._sim_timestamp - self._body_com_acc_w.timestamp
@@ -447,6 +497,7 @@ class RigidObjectData(BaseRigidObjectData):
         Shape is (num_instances, 1), dtype = wp.vec3f. In torch this resolves to (num_instances, 1, 3).
         This quantity is the center of mass location relative to its body's link frame.
         """
+        self._check_binding_model()
         return self._body_com_pos_b_ta
 
     @property
@@ -457,6 +508,7 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity is the pose of the center of mass frame of the rigid body relative to the body's link frame.
         The orientation is provided in (x, y, z, w) format.
         """
+        self._check_binding_model()
         warnings.warn(
             "In Newton, body com pose always has unit quaternion. Consider using body_com_pos_b instead."
             "Querying this property requires appending a unit quaternion to the position which is expensive.",
@@ -487,6 +539,7 @@ class RigidObjectData(BaseRigidObjectData):
 
         Shape is (num_instances,), dtype = wp.vec3f. In torch this resolves to (num_instances, 3).
         """
+        self._check_binding_model()
         if self._projected_gravity_b.data is None:
             self._projected_gravity_b.data = ProxyArray(wp.empty(self._num_instances, wp.vec3f, self.device))
         if self._projected_gravity_b.timestamp < self._sim_timestamp:
@@ -511,6 +564,7 @@ class RigidObjectData(BaseRigidObjectData):
             This quantity is computed by assuming that the forward-direction of the base
             frame is along x-direction, i.e. :math:`(1, 0, 0)`.
         """
+        self._check_binding_model()
         if self._heading_w.data is None:
             self._heading_w.data = ProxyArray(wp.empty(self._num_instances, wp.float32, self.device))
         if self._heading_w.timestamp < self._sim_timestamp:
@@ -533,6 +587,7 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity is the linear velocity of the actor frame of the root rigid body frame with respect to the
         rigid body's actor frame.
         """
+        self._check_binding_model()
         if self._root_link_lin_vel_b is None:
             self._root_link_lin_vel_b = TimestampedBuffer(wp.empty(self._num_instances, wp.vec3f, self.device))
             self._root_link_lin_vel_b_ta = ProxyArray(self._root_link_lin_vel_b.data)
@@ -555,6 +610,7 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity is the angular velocity of the actor frame of the root rigid body frame with respect to the
         rigid body's actor frame.
         """
+        self._check_binding_model()
         if self._root_link_ang_vel_b is None:
             self._root_link_ang_vel_b = TimestampedBuffer(wp.empty(self._num_instances, wp.vec3f, self.device))
             self._root_link_ang_vel_b_ta = ProxyArray(self._root_link_ang_vel_b.data)
@@ -577,6 +633,7 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity is the linear velocity of the root rigid body's center of mass frame with respect to the
         rigid body's actor frame.
         """
+        self._check_binding_model()
         if self._root_com_lin_vel_b is None:
             self._root_com_lin_vel_b = TimestampedBuffer(wp.empty(self._num_instances, wp.vec3f, self.device))
             self._root_com_lin_vel_b_ta = ProxyArray(self._root_com_lin_vel_b.data)
@@ -599,6 +656,7 @@ class RigidObjectData(BaseRigidObjectData):
         This quantity is the angular velocity of the root rigid body's center of mass frame with respect to the
         rigid body's actor frame.
         """
+        self._check_binding_model()
         if self._root_com_ang_vel_b is None:
             self._root_com_ang_vel_b = TimestampedBuffer(wp.empty(self._num_instances, wp.vec3f, self.device))
             self._root_com_ang_vel_b_ta = ProxyArray(self._root_com_ang_vel_b.data)
@@ -856,6 +914,9 @@ class RigidObjectData(BaseRigidObjectData):
         .. caution:: This is possible if and only if the properties that we access are strided from newton and not
         indexed. Newton willing this is the case all the time, but we should pay attention to this if things look off.
         """
+        self._check_binding_model()
+        model = SimulationManager.get_model()
+        state = SimulationManager.get_state_0()
         # A full reset replaces simulation arrays.
         self._read_launch_cache.clear()
 
@@ -864,34 +925,33 @@ class RigidObjectData(BaseRigidObjectData):
         self._num_bodies = self._root_view.link_count
 
         # -- root properties
-        if self._root_view.is_fixed_base:
-            self._sim_bind_root_link_pose_w = self._root_view.get_root_transforms(SimulationManager.get_state_0())[
-                :, 0, 0
-            ]
-        else:
-            self._sim_bind_root_link_pose_w = self._root_view.get_root_transforms(SimulationManager.get_state_0())[:, 0]
-        self._sim_bind_root_com_vel_w = self._root_view.get_root_velocities(SimulationManager.get_state_0())
+        root_poses = self._root_view.get_root_transforms(state)
+        self._sim_bind_root_link_pose_w = root_poses[:, 0, 0] if root_poses.ndim == 3 else root_poses[:, 0]
+        self._sim_bind_root_com_vel_w = self._root_view.get_root_velocities(state)
         if self._sim_bind_root_com_vel_w is not None:
             if self._root_view.is_fixed_base:
                 self._sim_bind_root_com_vel_w = self._sim_bind_root_com_vel_w[:, 0, 0]
             else:
                 self._sim_bind_root_com_vel_w = self._sim_bind_root_com_vel_w[:, 0]
         # -- body properties
-        self._sim_bind_body_com_pos_b = self._root_view.get_attribute("body_com", SimulationManager.get_model())[:, 0]
-        self._sim_bind_body_link_pose_w = self._root_view.get_link_transforms(SimulationManager.get_state_0())[:, 0]
-        self._sim_bind_body_com_vel_w = self._root_view.get_link_velocities(SimulationManager.get_state_0())[:, 0]
-        self._sim_bind_body_mass = self._root_view.get_attribute("body_mass", SimulationManager.get_model())[:, 0]
-        self._sim_bind_body_inv_mass = self._root_view.get_attribute("body_inv_mass", SimulationManager.get_model())[
-            :, 0
-        ]
-        self._sim_bind_body_inv_inertia = self._root_view.get_attribute(
-            "body_inv_inertia", SimulationManager.get_model()
-        )[:, 0]
+        self._sim_bind_body_com_pos_b = self._root_view.get_attribute("body_com", model)[:, 0]
+        self._sim_bind_body_link_pose_w = self._root_view.get_link_transforms(state)[:, 0]
+        self._sim_bind_body_com_vel_w = self._root_view.get_link_velocities(state)[:, 0]
+        if self._sim_bind_root_com_vel_w is None:
+            # Fixed roots have no generalized velocity. Preserve the public velocity shapes on every READY.
+            logger.warning("The root has no generalized velocity. Binding zero velocities for this fixed rigid body.")
+            self._sim_bind_root_com_vel_w = wp.zeros(self._num_instances, dtype=wp.spatial_vectorf, device=self.device)
+            self._sim_bind_body_com_vel_w = wp.zeros(
+                (self._num_instances, 1), dtype=wp.spatial_vectorf, device=self.device
+            )
+        self._sim_bind_body_mass = self._root_view.get_attribute("body_mass", model)[:, 0]
+        self._sim_bind_body_inv_mass = self._root_view.get_attribute("body_inv_mass", model)[:, 0]
+        self._sim_bind_body_inv_inertia = self._root_view.get_attribute("body_inv_inertia", model)[:, 0]
         # Newton stores body_inertia as (N, 1, 1) mat33f — the [:, 0] removes the padding dim
         # giving (N, 1) mat33f. Reinterpret as (N, 1, 9) float32 via pointer aliasing.
         # Each mat33f element is 9 contiguous float32 values (36 bytes), so the inner stride is 4.
         # The slice may be non-contiguous in the outer dims, so we preserve those strides.
-        _body_inertia_raw = self._root_view.get_attribute("body_inertia", SimulationManager.get_model())[:, 0]
+        _body_inertia_raw = self._root_view.get_attribute("body_inertia", model)[:, 0]
         self._sim_bind_body_inertia = wp.array(
             ptr=_body_inertia_raw.ptr,
             dtype=wp.float32,
@@ -900,14 +960,19 @@ class RigidObjectData(BaseRigidObjectData):
             device=_body_inertia_raw.device,
             copy=False,
         )
-        self._sim_bind_body_external_wrench = self._root_view.get_attribute("body_f", SimulationManager.get_state_0())[
-            :, 0
-        ]
+        self._sim_bind_body_external_wrench = self._root_view.get_attribute("body_f", state)[:, 0]
 
         # Re-pin ProxyArray wrappers to the newly created sim bindings.
         # On first init, _create_buffers() handles this after all buffers exist.
         if hasattr(self, "_root_link_pose_w_ta"):
+            if self._bound_state() is not state:
+                reset_timestamps(buffer for buffer in vars(self).values() if isinstance(buffer, TimestampedBuffer))
+                # Acceleration starts a new finite-difference interval at the current simulation time.
+                wp.copy(self._previous_body_com_vel, self._sim_bind_body_com_vel_w)
+                self._body_com_acc_w.data.zero_()
+                self._body_com_acc_w.timestamp = self._sim_timestamp
             self._pin_proxy_arrays()
+        self._bound_state = weakref.ref(state)
 
     def _create_buffers(self) -> None:
         """Create buffers for the root data."""
@@ -915,24 +980,13 @@ class RigidObjectData(BaseRigidObjectData):
         self._num_instances = self._root_view.count
         num_instances, device = self._num_instances, self.device
         body_shape = (num_instances, 1)
-        # Initialize history for finite differencing. If the rigid object is fixed, the root com velocity is not
-        # available, so we use zeros.
-        if self._root_view.get_root_velocities(SimulationManager.get_state_0()) is None:
-            logger.warning(
-                "Failed to get root com velocity. If the rigid object is fixed, this is expected. "
-                "Setting root com velocity to zeros."
-            )
-            self._sim_bind_root_com_vel_w = wp.zeros((num_instances,), dtype=wp.spatial_vectorf, device=device)
-            self._sim_bind_body_com_vel_w = wp.zeros((num_instances,), dtype=wp.spatial_vectorf, device=device)
         # -- default root pose and velocity
         self._default_root_pose = wp.zeros((num_instances,), dtype=wp.transformf, device=device)
         self._default_root_vel = wp.zeros((num_instances,), dtype=wp.spatial_vectorf, device=device)
         self._default_root_state = None  # lazily allocated by deprecated default_root_state property
 
         # Initialize history for finite differencing
-        self._previous_body_com_vel = wp.clone(self._root_view.get_link_velocities(SimulationManager.get_state_0()))[
-            :, 0
-        ]
+        self._previous_body_com_vel = wp.clone(self._sim_bind_body_com_vel_w)
 
         # Initialize the lazy buffers.
         # -- link frame w.r.t. world frame
@@ -1064,6 +1118,7 @@ class RigidObjectData(BaseRigidObjectData):
     @property
     def root_state_w(self) -> ProxyArray:
         """Deprecated, same as :attr:`root_link_pose_w` and :attr:`root_com_vel_w`."""
+        self._check_binding_model()
         warnings.warn(
             "The `root_state_w` property will be deprecated in IsaacLab 4.0. Please use `root_link_pose_w` and "
             "`root_com_vel_w` instead.",
@@ -1088,6 +1143,7 @@ class RigidObjectData(BaseRigidObjectData):
     @property
     def root_link_state_w(self) -> ProxyArray:
         """Deprecated, same as :attr:`root_link_pose_w` and :attr:`root_link_vel_w`."""
+        self._check_binding_model()
         warnings.warn(
             "The `root_link_state_w` property will be deprecated in IsaacLab 4.0. Please use `root_link_pose_w` and "
             "`root_link_vel_w` instead.",
@@ -1112,6 +1168,7 @@ class RigidObjectData(BaseRigidObjectData):
     @property
     def root_com_state_w(self) -> ProxyArray:
         """Deprecated, same as :attr:`root_com_pose_w` and :attr:`root_com_vel_w`."""
+        self._check_binding_model()
         warnings.warn(
             "The `root_com_state_w` property will be deprecated in IsaacLab 4.0. Please use `root_com_pose_w` and "
             "`root_com_vel_w` instead.",
@@ -1161,6 +1218,7 @@ class RigidObjectData(BaseRigidObjectData):
     @property
     def body_state_w(self) -> ProxyArray:
         """Deprecated, same as :attr:`body_link_pose_w` and :attr:`body_com_vel_w`."""
+        self._check_binding_model()
         warnings.warn(
             "The `body_state_w` property will be deprecated in IsaacLab 4.0. Please use `body_link_pose_w` and "
             "`body_com_vel_w` instead.",
@@ -1187,6 +1245,7 @@ class RigidObjectData(BaseRigidObjectData):
     @property
     def body_link_state_w(self) -> ProxyArray:
         """Deprecated, same as :attr:`body_link_pose_w` and :attr:`body_link_vel_w`."""
+        self._check_binding_model()
         warnings.warn(
             "The `body_link_state_w` property will be deprecated in IsaacLab 4.0. Please use `body_link_pose_w` and "
             "`body_link_vel_w` instead.",
@@ -1213,6 +1272,7 @@ class RigidObjectData(BaseRigidObjectData):
     @property
     def body_com_state_w(self) -> ProxyArray:
         """Deprecated, same as :attr:`body_com_pose_w` and :attr:`body_com_vel_w`."""
+        self._check_binding_model()
         warnings.warn(
             "The `body_com_state_w` property will be deprecated in IsaacLab 4.0. Please use `body_com_pose_w` and "
             "`body_com_vel_w` instead.",

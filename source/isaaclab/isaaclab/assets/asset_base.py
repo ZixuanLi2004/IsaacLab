@@ -94,11 +94,17 @@ class AssetBase(Asset, ABC):
         else:
             self._check_shapes = not self.cfg.disable_shape_checks
         self._is_initialized = False
-        self._register_callbacks()
-
-        # add handle for debug visualization (this is set to a valid handle inside set_debug_vis)
         self._debug_vis_handle = None
-        self.set_debug_vis(self.cfg.debug_vis)
+        try:
+            self._register_callbacks()
+            self.set_debug_vis(self.cfg.debug_vis)
+        except BaseException as error:
+            # The caller cannot release an asset whose constructor never returned.
+            try:
+                self._clear_callbacks()
+            except Exception as cleanup_error:
+                error.add_note(f"Asset callback cleanup also failed: {cleanup_error!r}")
+            raise
 
     def __del__(self):
         """Unsubscribe from the callbacks."""

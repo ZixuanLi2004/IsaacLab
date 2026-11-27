@@ -27,6 +27,15 @@ from isaaclab.test.utils import DeviceScope, test_devices
 pytestmark = pytest.mark.integration
 
 
+@pytest.fixture(autouse=True)
+def _isolate_newton_backend(backend, monkeypatch):
+    if backend == "newton":
+        from isaaclab_newton.physics import NewtonManager
+
+        # Live Newton asset reads and writes must see their model throughout the test.
+        monkeypatch.setattr(NewtonManager, "backend", MagicMock())
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------

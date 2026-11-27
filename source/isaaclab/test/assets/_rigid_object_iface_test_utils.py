@@ -11,7 +11,6 @@
 from unittest.mock import MagicMock
 
 import _iface_test_boot  # noqa: F401  (starts the runtime)
-
 import numpy as np
 import warp as wp
 
@@ -48,11 +47,10 @@ else:
 
 try:
     import ovphysx  # noqa: F401
-
     from isaaclab_ov.assets.rigid_object.rigid_object import RigidObject as OvPhysxRigidObject
     from isaaclab_ov.assets.rigid_object.rigid_object_data import RigidObjectData as OvPhysxRigidObjectData
-    from isaaclab_ov.test.fixtures.views import MockOvPhysxBindingSet
     from isaaclab_ov.physics.ovphysx_manager import OvPhysxManager, OvPhysxSceneDataBackend
+    from isaaclab_ov.test.fixtures.views import MockOvPhysxBindingSet
 except ImportError:
     pass
 else:
@@ -130,7 +128,7 @@ def create_newton_rigid_object(
     device: str = "cuda:0",
 ):
     """Create a test Newton RigidObject instance with mocked dependencies."""
-    import isaaclab_newton.assets.rigid_object.rigid_object_data as newton_data_module
+    from isaaclab_newton.physics import NewtonManager
 
     body_names = ["body_0"]
 
@@ -146,32 +144,19 @@ def create_newton_rigid_object(
     )
     mock_view.set_random_mock_data()
     mock_view._noop_setters = True
+    mock_view.world_count = num_instances
+    mock_view.world_ids = wp.array(np.arange(num_instances, dtype=np.int32), device=device)
+    mock_view.is_sparse = False
+    mock_view.is_floating_base = True
 
-    # Mock NewtonManager (aliased as SimulationManager in Newton modules)
-    mock_model = MagicMock()
+    mock_model = NewtonManager.backend.model
     mock_model.world_count = num_instances
     mock_model.gravity = wp.array(
         np.tile(np.array([[0.0, 0.0, -9.81]], dtype=np.float32), (num_instances + 1, 1)),
         dtype=wp.vec3f,
         device=device,
     )
-    mock_state = MagicMock()
-    mock_control = MagicMock()
-
-    mock_manager = MagicMock()
-    mock_manager.get_model.return_value = mock_model
-    mock_manager.get_state_0.return_value = mock_state
-    mock_manager.get_state_1.return_value = mock_state
-    mock_manager.get_control.return_value = mock_control
-
-    # Patch SimulationManager in the Newton data module
-    original_sim_manager = newton_data_module.SimulationManager
-    newton_data_module.SimulationManager = mock_manager
-
-    try:
-        data = NewtonRigidObjectData(mock_view, device)
-    finally:
-        newton_data_module.SimulationManager = original_sim_manager
+    data = NewtonRigidObjectData(mock_view, device)
 
     # Create RigidObject shell (bypass __init__)
     rigid_object = object.__new__(NewtonRigidObject)
@@ -260,7 +245,6 @@ def create_ovphysx_rigid_object(
     object.__setattr__(obj, "_debug_vis_handle", None)
 
     return obj, mock_bindings
-
 
 
 def get_rigid_object(

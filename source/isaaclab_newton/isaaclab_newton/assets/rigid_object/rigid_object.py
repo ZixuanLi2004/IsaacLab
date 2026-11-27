@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 import numpy as np
 import torch
 import warp as wp
-from newton import ModelFlags
+from newton import JointType, Model, ModelFlags
 from newton.selection import ArticulationView
 
 from pxr import UsdPhysics
@@ -53,13 +53,82 @@ class RigidObject(BaseRigidObject):
     __backend_name__: str = "newton"
     """The name of the backend for the rigid object."""
 
-    def __init__(self, cfg: RigidObjectCfg):
+    _provided_root_model: Model | None = None
+
+    def __init__(self, cfg: RigidObjectCfg, *, root_view: ArticulationView | None = None):
         """Initialize the rigid object.
 
         Args:
             cfg: A configuration instance.
+            root_view: Optional selection of existing standalone free bodies. Select one in each model
+                world (in model order), or a single body in a local or global world. Asset indices
+                address rows of the selection. The caller selects the bodies corresponding to
+                ``cfg.prim_path``. Their shapes may differ. The selection belongs to the active model.
         """
+        self._provided_root_view = root_view
+        self._physics_ready_handle = None
+        if root_view is not None:
+            if cfg.spawn is not None:
+                raise ValueError("A preselected rigid body view requires spawn=None.")
+            self._provided_root_model = root_view.model
+            self._check_root_view_model()
+            if not self.supports_root_view(root_view):
+                raise ValueError(
+                    "RigidObject requires one standalone FREE body per world with identity joint anchors"
+                    " and strided state bindings."
+                )
         super().__init__(cfg)
+
+    @staticmethod
+    def _has_identity_anchors(model: Model, joint_ids: np.ndarray) -> bool:
+        # The public pose/velocity tensors alias joint_q and joint_qd. Reading
+        # world state through those tensors requires both joint frames to coincide
+        # with their body frames. Quaternion signs describe the same rotation.
+        for anchors in (model.joint_X_p, model.joint_X_c):
+            transforms = anchors.numpy()[joint_ids]
+            if np.any(transforms[..., :6] != 0) or np.any(np.abs(transforms[..., 6]) != 1):
+                return False
+        return True
+
+    @staticmethod
+    def supports_root_view(view: ArticulationView) -> bool:
+        """Whether the selected bodies and root states can be bound directly to native arrays.
+
+        RigidObjectData writes through its bindings. Each consumed frequency needs a slice
+        in every world, with a regular stride between worlds. Shape data is accessed separately.
+        """
+        if (
+            (view.world_count != 1 and (view.is_sparse or view.world_count != view.model.world_count))
+            or view.count_per_world != 1
+            or view.link_count != 1
+            or view.joint_count != 1
+            or view.root_joint_type != JointType.FREE
+        ):
+            return False
+        frequency = Model.AttributeFrequency
+        for key in (frequency.BODY, frequency.JOINT, frequency.JOINT_COORD, frequency.JOINT_DOF):
+            layout = view.frequency_layouts.get(key)
+            if layout is None or not layout.is_contiguous:
+                return False
+        # A filtered selection can expose a single link of a larger articulation.
+        owners = view.model.joint_articulation.numpy()
+        owned_joints = np.bincount(owners[owners >= 0], minlength=view.model.articulation_count)
+        ids = view.articulation_ids.numpy()[:, 0]
+        joints = view.frequency_layouts[frequency.JOINT].get_absolute_indices(view.world_count, 1)[:, 0, 0]
+        return bool(
+            np.all(owned_joints[ids] == 1)
+            and np.all(view.model.joint_parent.numpy()[joints] == -1)
+            and RigidObject._has_identity_anchors(view.model, joints)
+        )
+
+    def _check_root_view_model(self) -> None:
+        model = self._provided_root_model
+        if model is not None and (
+            model is not SimulationManager.get_model() or model is not self._provided_root_view.model
+        ):
+            raise RuntimeError(
+                "The preselected rigid body view belongs to a different Newton model. Recreate the asset."
+            )
 
     """
     Properties
@@ -67,6 +136,7 @@ class RigidObject(BaseRigidObject):
 
     @property
     def data(self) -> RigidObjectData:
+        self._check_root_view_model()
         return self._data
 
     @property
@@ -93,6 +163,7 @@ class RigidObject(BaseRigidObject):
         .. note::
             Use this view with caution. It requires handling of tensors in a specific way.
         """
+        self._check_root_view_model()
         return self._root_view
 
     @property
@@ -120,28 +191,40 @@ class RigidObject(BaseRigidObject):
     Operations.
     """
 
-    def reset(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | None = None) -> None:
+    def reset(self, env_ids: Sequence[int] | None = None, env_mask: wp.array | torch.Tensor | None = None) -> None:
         """Reset the rigid object.
 
         Args:
             env_ids: Environment indices. If None, then all indices are used.
-            env_mask: Environment mask. If None, then all the instances are updated. Shape is (num_instances,).
+            env_mask: Boolean mask on the asset device, with shape (num_instances,). Takes precedence over env_ids.
         """
-        # resolve all indices
-        if (env_ids is None) or (env_ids == slice(None)):
-            env_ids = slice(None)
-        # reset external wrench
-        self._instantaneous_wrench_composer.reset(env_ids)
-        self._permanent_wrench_composer.reset(env_ids)
+        if env_mask is not None:
+            env_mask = self._validate_env_mask(env_mask)
+        self._instantaneous_wrench_composer.reset(env_ids, env_mask)
+        self._permanent_wrench_composer.reset(env_ids, env_mask)
+
+    def _validate_env_mask(self, env_mask: wp.array | torch.Tensor) -> wp.array:
+        if isinstance(env_mask, torch.Tensor):
+            env_mask = wp.from_torch(env_mask)
+        if not isinstance(env_mask, wp.array) or env_mask.dtype != wp.bool:
+            raise TypeError("env_mask must be a boolean Warp array or Torch tensor.")
+        if env_mask.shape != (self.num_instances,) or env_mask.device != wp.get_device(self.device):
+            raise ValueError(f"env_mask must have shape ({self.num_instances},) on {self.device}.")
+        return env_mask
 
     def write_data_to_sim(self) -> None:
-        """Write external wrench to the simulation.
+        """Write this step's external wrenches for all asset rows."""
+        self.write_wrenches_to_sim()
 
-        .. note::
-            We write external wrench to the simulation here since this function is called before the simulation step.
-            This ensures that the external wrench is applied at every simulation step.
+    def write_wrenches_to_sim(self, env_mask: wp.array | torch.Tensor | None = None) -> None:
+        """Flush this step's composed external wrenches and consume its instantaneous commands.
+
+        Args:
+            env_mask: Asset rows whose native force buffers this asset owns. Unselected buffers retain
+                their existing force and torque. Defaults to all rows.
         """
-        # write external wrench
+        if env_mask is not None:
+            env_mask = self._validate_env_mask(env_mask)
         if self._instantaneous_wrench_composer.active or self._permanent_wrench_composer.active:
             if self._instantaneous_wrench_composer.active:
                 composer = self._instantaneous_wrench_composer
@@ -158,7 +241,7 @@ class RigidObject(BaseRigidObject):
                     torque_b,
                     self._data.body_link_pose_w.warp,
                     self._data._sim_bind_body_external_wrench,
-                    self._ALL_ENV_MASK,
+                    self._ALL_ENV_MASK if env_mask is None else env_mask,
                     self._ALL_BODY_MASK,
                 ],
             )
@@ -584,6 +667,7 @@ class RigidObject(BaseRigidObject):
             outputs=[
                 self.data.root_com_vel_w,
                 self.data.body_com_acc_w,
+                self.data._writable_root_velocity_history,
             ],
             device=self.device,
         )
@@ -636,6 +720,7 @@ class RigidObject(BaseRigidObject):
             outputs=[
                 self.data.root_com_vel_w,
                 self.data.body_com_acc_w,
+                self.data._writable_root_velocity_history,
             ],
             device=self.device,
         )
@@ -694,6 +779,7 @@ class RigidObject(BaseRigidObject):
                 self.data.root_link_vel_w,
                 self.data.root_com_vel_w,
                 self.data.body_com_acc_w,
+                self.data._writable_root_velocity_history,
             ],
             device=self.device,
         )
@@ -750,6 +836,7 @@ class RigidObject(BaseRigidObject):
                 self.data.root_link_vel_w,
                 self.data.root_com_vel_w,
                 self.data.body_com_acc_w,
+                self.data._writable_root_velocity_history,
             ],
             device=self.device,
         )
@@ -1064,27 +1151,34 @@ class RigidObject(BaseRigidObject):
     """
 
     def _initialize_impl(self):
-        def has_rigid_body_api(prim) -> bool:
-            return bool(prim.HasAPI(UsdPhysics.RigidBodyAPI))
+        if self._provided_root_view is None:
+            _, root_prim_path_expr = resolve_matching_prims_from_source(
+                self.cfg.prim_path, predicate=lambda prim: prim.HasAPI(UsdPhysics.RigidBodyAPI), expected_num_matches=1
+            )[0]
+            self._root_view = ArticulationView(
+                SimulationManager.get_model(), path_expr_to_glob(root_prim_path_expr), verbose=False
+            )
+            if self._root_view.root_joint_type == JointType.FREE:
+                model = self._root_view.model
+                root_joints = model.articulation_start.numpy()[self._root_view.articulation_ids.numpy()]
+                if not self._has_identity_anchors(model, root_joints):
+                    raise ValueError(
+                        "RigidObject requires identity parent and child FREE joint anchors for world-state binding."
+                    )
+        else:
+            self._root_view = self._provided_root_view
 
-        resolve_kwargs = {"predicate": has_rigid_body_api, "expected_num_matches": 1}
-        _, root_prim_path_expr = resolve_matching_prims_from_source(self.cfg.prim_path, **resolve_kwargs)[0]
-        # -- object view
-        self._root_view = ArticulationView(
-            SimulationManager.get_model(),
-            path_expr_to_glob(root_prim_path_expr),
-            verbose=False,
-        )
-
+        # RigidObjectData indexes one body per view world and sizes buffers from the total count.
+        if self._root_view.count_per_world != 1 or self._root_view.link_count != 1:
+            raise ValueError(f"RigidObject requires exactly one rigid body per selected world: {self.cfg.prim_path}")
         # container for data access
         self._data = RigidObjectData(self.root_view, self.device)
 
         # Register callback to rebind simulation data after a full reset (model/state recreation).
-        self._physics_ready_handle = SimulationManager.register_callback(
-            lambda _: self._data._create_simulation_bindings(),
-            PhysicsEvent.PHYSICS_READY,
-            name=f"rigid_object_rebind_{self.cfg.prim_path}",
-        )
+        if self._physics_ready_handle is None:
+            self._physics_ready_handle = SimulationManager.register_callback(
+                self._rebind_on_ready, PhysicsEvent.PHYSICS_READY, name=f"rigid_object_rebind_{self.cfg.prim_path}"
+            )
 
         # create buffers
         self._create_buffers()
@@ -1094,6 +1188,12 @@ class RigidObject(BaseRigidObject):
         self.update(0.0)
         # Let the rigid object data know that it is fully instantiated and ready to use.
         self.data.is_primed = True
+
+    def _rebind_on_ready(self, _event) -> None:
+        # Following STOP, AssetBase initializes the asset from scratch later in this READY dispatch.
+        if self.is_initialized:
+            self._check_root_view_model()
+            self._data._create_simulation_bindings()
 
     def _clear_callbacks(self) -> None:
         """Clears all registered callbacks, including the physics-ready rebind handle."""

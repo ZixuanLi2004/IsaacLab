@@ -621,6 +621,21 @@ def set_root_com_pose_to_sim_mask(
         root_link_pose_w[i] = get_com_pose_in_link_frame_func(root_com_pose_w[i], body_com_pos_b[i, 0])
 
 
+@wp.func
+def _reset_acceleration_after_velocity_write(
+    row: int,
+    num_bodies: int,
+    root_com_velocity: wp.spatial_vectorf,
+    body_acc_w: wp.array2d(dtype=wp.spatial_vectorf),
+    previous_root_com_vel: wp.array2d(dtype=wp.spatial_vectorf),
+):
+    # A standalone body's commanded COM velocity is the baseline for its next finite difference.
+    if previous_root_com_vel:
+        previous_root_com_vel[row, 0] = root_com_velocity
+    for body in range(num_bodies):
+        body_acc_w[row, body] = wp.spatial_vectorf(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+
+
 @wp.kernel
 def set_root_com_velocity_to_sim_index(
     data: wp.array(dtype=wp.spatial_vectorf),
@@ -628,6 +643,7 @@ def set_root_com_velocity_to_sim_index(
     num_bodies: wp.int32,
     root_com_velocity_w: wp.array(dtype=wp.spatial_vectorf),
     body_acc_w: wp.array2d(dtype=wp.spatial_vectorf),
+    previous_root_com_vel: wp.array2d(dtype=wp.spatial_vectorf),
 ):
     """Write root COM velocity data to simulation buffers.
 
@@ -641,13 +657,14 @@ def set_root_com_velocity_to_sim_index(
         root_com_velocity_w: Output array where root COM velocities are written. Shape is (num_envs,).
         body_acc_w: Output array where body accelerations are zeroed. Shape is
             (num_envs, num_bodies).
+        previous_root_com_vel: Optional standalone rigid body velocity history for finite differencing.
     """
     i = wp.tid()
     env_id = wp.int32(env_ids[i])
     root_com_velocity_w[env_id] = data[i]
-    # Make the acceleration zero to prevent reporting old values
-    for j in range(num_bodies):
-        body_acc_w[env_id, j] = wp.spatial_vectorf(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    _reset_acceleration_after_velocity_write(
+        env_id, num_bodies, root_com_velocity_w[env_id], body_acc_w, previous_root_com_vel
+    )
 
 
 @wp.kernel
@@ -657,6 +674,7 @@ def set_root_com_velocity_to_sim_mask(
     num_bodies: wp.int32,
     root_com_velocity_w: wp.array(dtype=wp.spatial_vectorf),
     body_acc_w: wp.array2d(dtype=wp.spatial_vectorf),
+    previous_root_com_vel: wp.array2d(dtype=wp.spatial_vectorf),
 ):
     """Write root COM velocity data to simulation buffers.
 
@@ -670,13 +688,14 @@ def set_root_com_velocity_to_sim_mask(
         root_com_velocity_w: Output array where root COM velocities are written. Shape is (num_envs,).
         body_acc_w: Output array where body accelerations are zeroed. Shape is
             (num_envs, num_bodies).
+        previous_root_com_vel: Optional standalone rigid body velocity history for finite differencing.
     """
     i = wp.tid()
     if env_mask[i]:
         root_com_velocity_w[i] = data[i]
-        # Make the acceleration zero to prevent reporting old values
-        for j in range(num_bodies):
-            body_acc_w[i, j] = wp.spatial_vectorf(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        _reset_acceleration_after_velocity_write(
+            i, num_bodies, root_com_velocity_w[i], body_acc_w, previous_root_com_vel
+        )
 
 
 @wp.kernel
@@ -689,6 +708,7 @@ def set_root_link_velocity_to_sim_index(
     root_link_velocity_w: wp.array(dtype=wp.spatial_vectorf),
     root_com_velocity_w: wp.array(dtype=wp.spatial_vectorf),
     body_acc_w: wp.array2d(dtype=wp.spatial_vectorf),
+    previous_root_com_vel: wp.array2d(dtype=wp.spatial_vectorf),
 ):
     """Write root link velocity data to simulation buffers.
 
@@ -709,6 +729,7 @@ def set_root_link_velocity_to_sim_index(
             are written. Shape is (num_envs,).
         body_acc_w: Output array where body accelerations are zeroed.
             Shape is (num_envs, num_bodies).
+        previous_root_com_vel: Optional standalone rigid body velocity history for finite differencing.
     """
     i = wp.tid()
     env_id = wp.int32(env_ids[i])
@@ -717,9 +738,9 @@ def set_root_link_velocity_to_sim_index(
     root_com_velocity_w[env_id] = get_link_velocity_in_com_frame_func(
         root_link_velocity_w[env_id], link_pose_w[env_id], body_com_pos_b[env_id, 0]
     )
-    # Make the acceleration zero to prevent reporting old values
-    for j in range(num_bodies):
-        body_acc_w[env_id, j] = wp.spatial_vectorf(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+    _reset_acceleration_after_velocity_write(
+        env_id, num_bodies, root_com_velocity_w[env_id], body_acc_w, previous_root_com_vel
+    )
 
 
 @wp.kernel
@@ -732,6 +753,7 @@ def set_root_link_velocity_to_sim_mask(
     root_link_velocity_w: wp.array(dtype=wp.spatial_vectorf),
     root_com_velocity_w: wp.array(dtype=wp.spatial_vectorf),
     body_acc_w: wp.array2d(dtype=wp.spatial_vectorf),
+    previous_root_com_vel: wp.array2d(dtype=wp.spatial_vectorf),
 ):
     """Write root link velocity data to simulation buffers.
 
@@ -752,6 +774,7 @@ def set_root_link_velocity_to_sim_mask(
             are written. Shape is (num_envs,).
         body_acc_w: Output array where body accelerations are zeroed.
             Shape is (num_envs, num_bodies).
+        previous_root_com_vel: Optional standalone rigid body velocity history for finite differencing.
     """
     i = wp.tid()
     if env_mask[i]:
@@ -760,9 +783,9 @@ def set_root_link_velocity_to_sim_mask(
         root_com_velocity_w[i] = get_link_velocity_in_com_frame_func(
             root_link_velocity_w[i], link_pose_w[i], body_com_pos_b[i, 0]
         )
-        # Make the acceleration zero to prevent reporting old values
-        for j in range(num_bodies):
-            body_acc_w[i, j] = wp.spatial_vectorf(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
+        _reset_acceleration_after_velocity_write(
+            i, num_bodies, root_com_velocity_w[i], body_acc_w, previous_root_com_vel
+        )
 
 
 _SET_ROOT_LINK_POSE_TO_SIM_INDEX_DISPATCHER = IndexKernelDispatcher(set_root_link_pose_to_sim_index, ("env_ids",))

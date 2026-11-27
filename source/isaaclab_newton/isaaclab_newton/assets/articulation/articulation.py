@@ -996,6 +996,7 @@ class Articulation(BaseArticulation):
             outputs=[
                 self.data.root_com_vel_w,
                 self.data.body_com_acc_w,
+                None,
             ],
             device=self.device,
         )
@@ -1048,6 +1049,7 @@ class Articulation(BaseArticulation):
             outputs=[
                 self.data.root_com_vel_w,
                 self.data.body_com_acc_w,
+                None,
             ],
             device=self.device,
         )
@@ -1106,6 +1108,7 @@ class Articulation(BaseArticulation):
                 self.data.root_link_vel_w,
                 self.data.root_com_vel_w,
                 self.data.body_com_acc_w,
+                None,
             ],
             device=self.device,
         )
@@ -1162,6 +1165,7 @@ class Articulation(BaseArticulation):
                 self.data.root_link_vel_w,
                 self.data.root_com_vel_w,
                 self.data.body_com_acc_w,
+                None,
             ],
             device=self.device,
         )
